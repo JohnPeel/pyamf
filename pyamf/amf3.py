@@ -23,6 +23,7 @@ L{ByteArray} and L{ArrayCollection}.
 
 import datetime
 import zlib
+import collections
 
 import pyamf
 from pyamf import codec, util, xml, python
@@ -108,6 +109,10 @@ TYPE_XMLSTRING = '\x0B'
 #: @see: U{Parsing ByteArrays on OSFlash (external)
 #: <http://osflash.org/documentation/amf3/parsing_byte_arrays>}
 TYPE_BYTEARRAY = '\x0C'
+#: ActionScript 3.0 introduces the L{Dictionary} type to hold key value pairs.
+#: AMF 3 serialises this type using a variable length encoding 29-bit integer
+#: for the count, followed by a byte for weak refrence, then the key value pairs.
+TYPE_DICTIONARY = '\x11'
 
 #: Reference bit.
 REFERENCE_BIT = 0x01
@@ -122,6 +127,9 @@ MIN_29B_INT = -0x10000000
 
 ENCODED_INT_CACHE = {}
 
+DictionaryItem = collections.namedtuple('DictionaryItem', ['key', 'value'])
+class Dictionary(list):
+    weak_ref = None
 
 class ObjectEncoding:
     """
@@ -783,6 +791,8 @@ class Decoder(codec.Decoder):
             return self.readXMLString
         elif data == TYPE_BYTEARRAY:
             return self.readByteArray
+        elif data == TYPE_DICTIONARY:
+            return self.readDictionary
 
     def readProxy(self, obj):
         """
@@ -1104,7 +1114,27 @@ class Decoder(codec.Decoder):
         self.context.addObject(obj)
 
         return obj
+    
+    def readDictionary(self):
+        """
+        Reads key value pairs from the stream.
+        
+        @see: L{Dictionary}
+        @note: This is not supported in ActionScript 1.0 and 2.0.
+        """
+	
+        ref = self.readInteger(False)
 
+        if ref & REFERENCE_BIT == 0:
+            return self.context.getObject(ref >> 1)
+        
+        obj = Dictionary()
+        obj.weak_ref = self.stream.read_uchar()
+        
+        for x in range(ref >> 1):
+            obj.append(DictionaryItem(self.readElement(), self.readElement()))
+        
+        return obj
 
 class Encoder(codec.Encoder):
     """
@@ -1132,6 +1162,8 @@ class Encoder(codec.Encoder):
             return self.writeByteArray
         elif t is pyamf.MixedArray:
             return self.writeDict
+        elif t is Dictionary:
+            return self.writeDictionary
 
         return codec.Encoder.getTypeFunc(self, data)
 
@@ -1520,7 +1552,30 @@ class Encoder(codec.Encoder):
         self.context.addObject(n)
 
         self.serialiseString(xml.tostring(n).encode('utf-8'))
+             
+    def writeDictionary(self, n):
+        """
+        Writes a L{Dictionary} to the data stream.
+        
+        @param n: The L{Dictionary} data to be encoded to the AMF3 data stream.
+        @type n: L{Dictionary}
+        """
+        self.stream.write(TYPE_DICTIONARY)
+        ref = self.context.getObjectReference(n)
 
+        if ref != -1:
+            self._writeInteger(ref << 1)
+
+            return
+	  
+        self.context.addObject(n)
+	
+        self._writeInteger(l << 1 | REFERENCE_BIT)
+        self.stream.write_uchar(n.weak_ref or 0)
+	
+        for x in n:
+            self.write(x.key)
+            self.write(x.value)
 
 def encode_int(n):
     """
